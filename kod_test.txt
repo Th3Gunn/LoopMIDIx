@@ -10,27 +10,39 @@
 
 static const char *TAG = "MIDI_SWITCHER";
 
-#define BTN_1_PIN           13
-#define BTN_2_PIN           12
-#define BTN_3_PIN           14
-#define BTN_4_PIN           27
+//buttons pins
+#define BTN_1_PIN           47
+#define BTN_2_PIN           16
+#define BTN_3_PIN           20
+#define BTN_4_PIN           38
+#define BTN_5_PIN           21
+#define BTN_6_PIN           0
+#define BTN_7_PIN           19
+#define BTN_8_PIN           45
+#define BTN_9_PIN           13
+#define BTN_10_PIN          14
 
-#define SHIFT_DATA_PIN      25
-#define SHIFT_CLOCK_PIN     26
-#define SHIFT_LATCH_PIN     33
+//74HC595 pins
+#define SHIFT_DATA_PIN      1  //SER
+#define SHIFT_CLOCK_PIN     2  //
+#define SHIFT_LATCH_PIN     41  //
+#define OE_PIN              40  // ~OE (Output Enable) pin
+#define SRCLR_PIN           42  // SRCLR (Serial Clear) pin
 
+//display pins
 #define PIN_NUM_MOSI        11
 #define PIN_NUM_CLK         12
 #define PIN_NUM_CS          10
 
-#define MIDI_UART_TX        UART_NUM_1
-#define MIDI_TX_PIN         4
-#define MIDI_UART_RX        UART_NUM_2
-#define MIDI_RX_PIN         16
+//UART pins
+#define MIDI_1_TX_PIN         15
+#define MIDI_1_RX_PIN         7
+#define MIDI_2_TX_PIN         5
+#define MIDI_2_RX_PIN         6
 
 typedef struct {
     char name[9];
-    uint8_t relay_flags;
+    uint16_t relay_flags;
     uint8_t midi_pc;
     uint8_t button_flags[4];
 } Preset;
@@ -190,19 +202,21 @@ void hw_init() {
 
 void app_main(void) {
     hw_init();
+    gpio_set_level(OE_PIN, 0);
+    gpio_set_level(SRCLR_PIN, 1);
 
-    strcpy(banki[0][0].name, "B0 A"); 
-    banki[0][0].relay_flags = 0b00000001; 
+    strcpy(banki[0][0].name, "1A"); 
+    banki[0][0].relay_flags = 0b0000000100000000; 
     banki[0][0].midi_pc = 10;
     banki[0][0].button_flags[0] = 0; 
 
-    strcpy(banki[0][1].name, "B0 B"); 
-    banki[0][1].relay_flags = 0b00000010; 
+    strcpy(banki[0][1].name, "1B"); 
+    banki[0][1].relay_flags = 0b0000001000000000; 
     banki[0][1].midi_pc = 11;
     banki[0][1].button_flags[1] = 0;
 
-    strcpy(banki[1][0].name, "B1 C"); 
-    banki[1][0].relay_flags = 0b00001111; 
+    strcpy(banki[1][0].name, "1C"); 
+    banki[1][0].relay_flags = 0b0000111100000000; 
     banki[1][0].midi_pc = 20;
 
     load_preset(0, 0);

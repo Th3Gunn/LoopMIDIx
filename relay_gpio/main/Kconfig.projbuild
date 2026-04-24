@@ -58,9 +58,9 @@ menu "Example Configuration"
             GPIO pin number connected to 74HC595 STCP (latch) pin.
 
     config BUTTON_PIN
-        int "Button input pin (active low, normally high)"
+        int "Button input pin (active high, normally low)"
         range ENV_GPIO_RANGE_MIN ENV_GPIO_IN_RANGE_MAX
-        default 1
+        default 39
         help
             GPIO pin number connected to the button. The example expects the button to be normally high and pull to GND when pressed.
 
