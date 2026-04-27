@@ -10,49 +10,45 @@
 
 static const char *TAG = "MIDI_SWITCHER";
 
-//buttons pins
+// ================= PINS =================
+// buttons pins
 #define BTN_1_PIN           47
 #define BTN_2_PIN           16
 #define BTN_3_PIN           20
 #define BTN_4_PIN           38
-#define BTN_5_PIN           21
-#define BTN_6_PIN           0
+#define BTN_5_PIN           21 // BANK DOWN
+#define BTN_6_PIN           0  // BANK UP
 #define BTN_7_PIN           19
 #define BTN_8_PIN           45
 #define BTN_9_PIN           13
 #define BTN_10_PIN          14
 
-//74HC595 pins
-#define SHIFT_DATA_PIN      1  //SER
-#define SHIFT_CLOCK_PIN     2  //
-#define SHIFT_LATCH_PIN     41  //
-#define OE_PIN              40  // ~OE (Output Enable) pin
-#define SRCLR_PIN           42  // SRCLR (Serial Clear) pin
+// 74HC595 pins
+#define SHIFT_DATA_PIN      1  // SER
+#define SHIFT_CLOCK_PIN     2  // SRCLK
+#define SHIFT_LATCH_PIN     41 // RCLK
+#define OE_PIN              40 // ~OE (Output Enable) pin
+#define SRCLR_PIN           42 // SRCLR (Serial Clear) pin
 
-//display pins
+// display pins
 #define PIN_NUM_MOSI        11
 #define PIN_NUM_CLK         12
 #define PIN_NUM_CS          10
 
-//UART pins
-#define MIDI_1_TX_PIN         15
-#define MIDI_1_RX_PIN         7
-#define MIDI_2_TX_PIN         5
-#define MIDI_2_RX_PIN         6
-
-// UART port configuration (do wyrzucenia - było tylko po to by się skompilowało)
-#define MIDI_UART_TX          UART_NUM_1
-#define MIDI_UART_RX          UART_NUM_2
-#define MIDI_TX_PIN           MIDI_1_TX_PIN
-#define MIDI_RX_PIN           MIDI_2_RX_PIN
+// UART pins
+#define MIDI_1_TX_PIN       15
+#define MIDI_1_RX_PIN       7
+#define MIDI_2_TX_PIN       5
+#define MIDI_2_RX_PIN       6
 
 // expression ADC pin
-#define EXP_ADC_PIN           4
+#define EXP_ADC_PIN         4
 
-//amp switch pins
-#define AMP_SWCH_R            48
-#define AMP_SWCH_T            39
+// amp switch pins
+#define AMP_SWCH_R          48
+#define AMP_SWCH_T          39
 
+// ================= STRUCTURES & DATA =================
 typedef struct {
     char name[9];
     uint16_t relay_flags;
@@ -62,13 +58,15 @@ typedef struct {
 
 #define NUM_BANKS 5
 #define PRESETS_PER_BANK 4
+#define TOTAL_PRESETS (NUM_BANKS * PRESETS_PER_BANK)
 
-Preset banki[NUM_BANKS][PRESETS_PER_BANK];
+Preset presety[TOTAL_PRESETS];
 int active_bank = 0;
-int active_preset_idx = 0;
+int active_preset_idx = 0; // Absolute index (0 to 19)
 
 static spi_device_handle_t spi_max;
 
+// ================= DISPLAY =================
 uint8_t get_char_segment(char c) {
     switch (toupper(c)) {
         case '0': return 0x7E; case '1': return 0x30; case '2': return 0x6D;
@@ -88,6 +86,7 @@ void max7219_send(uint8_t reg, uint8_t data) {
 }
 
 void Display_preset_name(const char* name) {
+    // Clear display first
     for(int i = 1; i <= 8; i++) max7219_send(i, 0x00);
     
     for (int i = 0; i < 8; i++) {
@@ -96,29 +95,44 @@ void Display_preset_name(const char* name) {
     }
 }
 
-void MIDI_TX(uint8_t channel, uint8_t pc_value) {
+// ================= MIDI =================
+void MIDI_TX(uart_port_t uart_num, uint8_t channel, uint8_t pc_value) {
     uint8_t status = 0xC0 | (channel & 0x0F);
     uint8_t msg[2] = { status, pc_value & 0x7F };
-    uart_write_bytes(MIDI_UART_TX, (const char *)msg, 2);
-    ESP_LOGI(TAG, "TX -> PC: %d na kanale %d", pc_value, channel + 1);
+    uart_write_bytes(uart_num, (const char *)msg, 2);
+    ESP_LOGI(TAG, "TX UART%d -> PC: %d na kanale %d", (uart_num == UART_NUM_1 ? 1 : 2), pc_value, channel + 1);
 }
 
 static void MIDI_RX(void *arg) {
     uint8_t data[128];
     while (1) {
-        int rxBytes = uart_read_bytes(MIDI_UART_RX, data, sizeof(data), pdMS_TO_TICKS(100));
-        if (rxBytes > 0) {
-            ESP_LOGI(TAG, "RX -> Otrzymano %d bajtów MIDI", rxBytes);
+        size_t len1 = 0;
+        uart_get_buffered_data_len(UART_NUM_1, &len1);
+        if (len1 > 0) {
+            int rx1 = uart_read_bytes(UART_NUM_1, data, sizeof(data), pdMS_TO_TICKS(10));
+            if (rx1 > 0) ESP_LOGI(TAG, "RX1 -> Otrzymano %d bajtów MIDI", rx1);
         }
+
+        size_t len2 = 0;
+        uart_get_buffered_data_len(UART_NUM_2, &len2);
+        if (len2 > 0) {
+            int rx2 = uart_read_bytes(UART_NUM_2, data, sizeof(data), pdMS_TO_TICKS(10));
+            if (rx2 > 0) ESP_LOGI(TAG, "RX2 -> Otrzymano %d bajtów MIDI", rx2);
+        }
+        
+        vTaskDelay(pdMS_TO_TICKS(10)); // Non-blocking delay
     }
 }
 
+// ================= RELAYS =================
 extern void esp_rom_delay_us(uint32_t us);
 
-void update_relays(uint8_t flags) {
+void update_relays(uint16_t flags) {
     gpio_set_level(SHIFT_LATCH_PIN, 0);
     gpio_set_level(SHIFT_CLOCK_PIN, 0);
-    for (int i = 0; i < 8; i++) {
+    
+    // Shift 16 bits for two daisy-chained 74HC595
+    for (int i = 0; i < 16; i++) {
         gpio_set_level(SHIFT_DATA_PIN, (flags >> i) & 0x1);
         gpio_set_level(SHIFT_CLOCK_PIN, 1);
         esp_rom_delay_us(1);
@@ -130,69 +144,85 @@ void update_relays(uint8_t flags) {
     gpio_set_level(SHIFT_LATCH_PIN, 0);
 }
 
-void load_preset(int bank, int preset) {
-    active_bank = bank;
-    active_preset_idx = preset;
-    Preset active_preset = banki[bank][preset];
+// ================= LOGIC =================
+void load_preset(int preset_idx) {
+    if(preset_idx >= TOTAL_PRESETS || preset_idx < 0) return;
 
-    update_relays(active_preset.relay_flags);
-    MIDI_TX(0, active_preset.midi_pc);
-    Display_preset_name(active_preset.name);
+    active_preset_idx = preset_idx;
+    active_bank = preset_idx / PRESETS_PER_BANK;
+    
+    Preset current = presety[preset_idx];
+
+    update_relays(current.relay_flags);
+    // Przykładowo wysyłamy sygnał na UART1, ale możesz dostosować
+    MIDI_TX(UART_NUM_1, 0, current.midi_pc); 
+    Display_preset_name(current.name);
 }
 
 static void Handle_Buttons_Task(void* arg) {
-    bool last_state[4] = {true, true, true, true}; 
+    bool last_state[6] = {true, true, true, true, true, true}; 
     
     while (1) {
-        bool b1 = gpio_get_level(BTN_1_PIN);
-        bool b2 = gpio_get_level(BTN_2_PIN);
-        bool b3 = gpio_get_level(BTN_3_PIN);
-        bool b4 = gpio_get_level(BTN_4_PIN);
+        bool current_state[6];
+        current_state[0] = gpio_get_level(BTN_1_PIN);
+        current_state[1] = gpio_get_level(BTN_2_PIN);
+        current_state[2] = gpio_get_level(BTN_3_PIN);
+        current_state[3] = gpio_get_level(BTN_4_PIN);
+        current_state[4] = gpio_get_level(BTN_5_PIN); // BANK DOWN
+        current_state[5] = gpio_get_level(BTN_6_PIN); // BANK UP
 
-        if (!b1 && !b2 && (last_state[0] || last_state[1])) {
+        // BANK DOWN (BTN 5)
+        if (!current_state[4] && last_state[4]) {
             active_bank = (active_bank > 0) ? active_bank - 1 : NUM_BANKS - 1;
-            load_preset(active_bank, 0); 
-            vTaskDelay(pdMS_TO_TICKS(300)); 
+            load_preset(active_bank * PRESETS_PER_BANK); // Wczytaj preset A z nowego banku
         } 
-        else if (!b3 && !b4 && (last_state[2] || last_state[3])) {
+        // BANK UP (BTN 6)
+        else if (!current_state[5] && last_state[5]) {
             active_bank = (active_bank + 1) % NUM_BANKS;
-            load_preset(active_bank, 0);
-            vTaskDelay(pdMS_TO_TICKS(300)); 
+            load_preset(active_bank * PRESETS_PER_BANK);
         }
+        // PRESETY 1-4 (A, B, C, D)
         else {
-            bool current_state[4] = {b1, b2, b3, b4};
             for (int i = 0; i < 4; i++) {
                 if (!current_state[i] && last_state[i]) { 
-                    Preset current_p = banki[active_bank][active_preset_idx];
+                    int target_preset_idx = (active_bank * PRESETS_PER_BANK) + i;
+                    
+                    Preset current_p = presety[active_preset_idx];
                     
                     if (current_p.button_flags[i] == 0) {
-                        load_preset(active_bank, i);
+                        load_preset(target_preset_idx);
                     } else if (current_p.button_flags[i] == 1) {
-                        ESP_LOGI(TAG, "Przycisk %d działa jako STOMPBOX", i+1);
+                        ESP_LOGI(TAG, "Przycisk %d dziala jako STOMPBOX", i+1);
                     }
                 }
             }
         }
 
-        last_state[0] = b1; last_state[1] = b2; last_state[2] = b3; last_state[3] = b4;
+        for(int i=0; i<6; i++) last_state[i] = current_state[i];
         vTaskDelay(pdMS_TO_TICKS(20)); 
     }
 }
 
+// ================= INIT =================
 void hw_init() {
+    // Buttons setup (1ULL pozwala na shift bitów powyżej 32, wymagane dla pinów ESP np. 47)
     gpio_config_t btn_conf = {
         .intr_type = GPIO_INTR_DISABLE, .mode = GPIO_MODE_INPUT,
-        .pin_bit_mask = (1ULL<<BTN_1_PIN)|(1ULL<<BTN_2_PIN)|(1ULL<<BTN_3_PIN)|(1ULL<<BTN_4_PIN),
+        .pin_bit_mask = (1ULL<<BTN_1_PIN)|(1ULL<<BTN_2_PIN)|(1ULL<<BTN_3_PIN)|
+                        (1ULL<<BTN_4_PIN)|(1ULL<<BTN_5_PIN)|(1ULL<<BTN_6_PIN),
         .pull_up_en = GPIO_PULLUP_ENABLE,
     };
     gpio_config(&btn_conf);
 
+    // Shift register setup - DODAŁEM OE I SRCLR
     gpio_config_t shift_conf = {
         .intr_type = GPIO_INTR_DISABLE, .mode = GPIO_MODE_OUTPUT,
-        .pin_bit_mask = (1ULL<<SHIFT_DATA_PIN)|(1ULL<<SHIFT_CLOCK_PIN)|(1ULL<<SHIFT_LATCH_PIN),
+        .pin_bit_mask = (1ULL<<SHIFT_DATA_PIN)|(1ULL<<SHIFT_CLOCK_PIN)|
+                        (1ULL<<SHIFT_LATCH_PIN)|(1ULL<<OE_PIN)|(1ULL<<SRCLR_PIN),
     };
     gpio_config(&shift_conf);
 
+    // SPI init
     spi_bus_config_t buscfg = { .mosi_io_num = PIN_NUM_MOSI, .miso_io_num = -1, .sclk_io_num = PIN_NUM_CLK, .max_transfer_sz = 2 };
     spi_device_interface_config_t devcfg = { .clock_speed_hz = 1*1000*1000, .mode = 0, .spics_io_num = PIN_NUM_CS, .queue_size = 1 };
     spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO);
@@ -203,43 +233,60 @@ void hw_init() {
     max7219_send(0x09, 0x00); 
     max7219_send(0x0A, 0x08); 
     
+    // UARTs init (2 pełne niezależne porty)
     uart_config_t uart_cfg = { .baud_rate = 31250, .data_bits = UART_DATA_8_BITS, .parity = UART_PARITY_DISABLE, .stop_bits = UART_STOP_BITS_1 };
-    uart_driver_install(MIDI_UART_TX, 256, 0, 0, NULL, 0);
-    uart_param_config(MIDI_UART_TX, &uart_cfg);
-    uart_set_pin(MIDI_UART_TX, MIDI_TX_PIN, -1, -1, -1);
     
-    uart_driver_install(MIDI_UART_RX, 1024, 0, 0, NULL, 0);
-    uart_param_config(MIDI_UART_RX, &uart_cfg);
-    uart_set_pin(MIDI_UART_RX, -1, MIDI_RX_PIN, -1, -1);
+    uart_driver_install(UART_NUM_1, 1024, 1024, 0, NULL, 0);
+    uart_param_config(UART_NUM_1, &uart_cfg);
+    uart_set_pin(UART_NUM_1, MIDI_1_TX_PIN, MIDI_1_RX_PIN, -1, -1);
+    
+    uart_driver_install(UART_NUM_2, 1024, 1024, 0, NULL, 0);
+    uart_param_config(UART_NUM_2, &uart_cfg);
+    uart_set_pin(UART_NUM_2, MIDI_2_TX_PIN, MIDI_2_RX_PIN, -1, -1);
 }
 
 void app_main(void) {
     hw_init();
+    
+    // Ustawienie układów 74HC595 do pracy (działa dzięki dodaniu ich do `shift_conf`)
     gpio_set_level(OE_PIN, 0);
     gpio_set_level(SRCLR_PIN, 1);
 
-    strcpy(banki[0][0].name, "1A"); 
-    banki[0][0].relay_flags = 0b0000000100000000; 
-    banki[0][0].midi_pc = 10;
-    banki[0][0].button_flags[0] = 0; 
+    // Czyszczenie całej tablicy, zapobiega wyświetlaniu śmieci z pamięci
+    memset(presety, 0, sizeof(presety));
 
-    strcpy(banki[0][1].name, "1B"); 
-    banki[0][1].relay_flags = 0b0000001000000000; 
-    banki[0][1].midi_pc = 11;
-    banki[0][1].button_flags[1] = 0;
+    // Preset 0 (Bank 0, A)
+    strcpy(presety[0].name, "1A"); 
+    presety[0].relay_flags = 0b0000000100000000; 
+    presety[0].midi_pc = 10;
+    presety[0].button_flags[0] = 0; 
 
-    strcpy(banki[1][0].name, "1C"); 
-    banki[1][0].relay_flags = 0b0000111100000000; 
-    banki[1][0].midi_pc = 20;
+    // Preset 1 (Bank 0, B)
+    strcpy(presety[1].name, "1B"); 
+    presety[1].relay_flags = 0b0010001000100000; 
+    presety[1].midi_pc = 11;
+    presety[1].button_flags[1] = 0;
 
-    load_preset(0, 0);
+    strcpy(presety[2].name, "1C"); 
+    presety[2].relay_flags = 0b1110001000100000; 
+    presety[2].midi_pc = 11;
+    presety[2].button_flags[1] = 0;
+
+    // Preset 4 (Bank 2, A)
+    strcpy(presety[4].name, "2A"); 
+    presety[4].relay_flags = 0b0000111100001000; 
+    presety[4].midi_pc = 20;
+
+    load_preset(0);
 
     xTaskCreate(Handle_Buttons_Task, "buttons_task", 2048, NULL, 5, NULL);
     xTaskCreate(MIDI_RX, "midi_rx_task", 4096, NULL, 4, NULL);
 }
 
-//przy wciśnięciu 3 i 4 wyświetlacz robi się czarny - brak wyświetlanych nazw presetów
-//lepiej zrobić strukturę presetów jako tablicę jednoowymiarową (można przypisać sobie przyciski np 5 i 6 do zmiany banków i wtedy po prostu zwiększasz lub zmniejszasz indeks o 4) przyciski 1-4 niech na razie będą tylko do zmiany presetów w obrębie banku, odpowiednio ABCD)
-//z MIDI wgl jest coś nie tak, nawet tego nie testowałem - powinny być 2 pełne niezależne porty UART, każdy z RX i TX, 
-//zmieniłem relay_flags na uint16_t (bo jest 14 przekaźników), poza tym przełączanie przekaźników nie działa - weź pod uwagę to, że 74HC595 ma jeszcze piny OE i SRCLR!!!
+//teraz przełączanie relayów działaale nie do końca -weź pod uwagę, że ostatnie 2 bity presety[].relay_flags odpowiadają za sterowanie 
+//przekaźnikami od AMP_SWCH_R i AMP_SWCH_T - poza tym pod każdy 74hc595 są podpięte tylko po 6 przekaźników
+//teraz na wyświetlaczu cały czas palą się wszystkie ledy!!!
+//przyciski bank up/down powinny działać tak, że zmieniamy bank na wyższy ale jeszcze nie wybieramy presetu - zostajemy na starym i dopiero gdy wciśniemy przycisk 1-4 to wybieramy preset z nowego banku
+//dodaj logi na konsoli o zmianie banku i presetu
+
 
