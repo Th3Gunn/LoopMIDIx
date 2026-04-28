@@ -155,7 +155,7 @@ void load_preset(int preset_idx) {
 
     update_relays(current.relay_flags);
     // Przykładowo wysyłamy sygnał na UART1, ale możesz dostosować
-    MIDI_TX(UART_NUM_1, 0, current.midi_pc); 
+    MIDI_TX(UART_NUM_2, 0, current.midi_pc); 
     Display_preset_name(current.name);
 }
 
@@ -283,10 +283,10 @@ void app_main(void) {
     xTaskCreate(MIDI_RX, "midi_rx_task", 4096, NULL, 4, NULL);
 }
 
-//teraz przełączanie relayów działaale nie do końca -weź pod uwagę, że ostatnie 2 bity presety[].relay_flags odpowiadają za sterowanie 
+//teraz przełączanie relayów działa ale nie do końca - weź pod uwagę, że ostatnie 2 bity presety[].relay_flags odpowiadają za sterowanie 
 //przekaźnikami od AMP_SWCH_R i AMP_SWCH_T - poza tym pod każdy 74hc595 są podpięte tylko po 6 przekaźników
-//teraz na wyświetlaczu cały czas palą się wszystkie ledy!!!
 //przyciski bank up/down powinny działać tak, że zmieniamy bank na wyższy ale jeszcze nie wybieramy presetu - zostajemy na starym i dopiero gdy wciśniemy przycisk 1-4 to wybieramy preset z nowego banku
 //dodaj logi na konsoli o zmianie banku i presetu
-
+//Można zacząć ogarniać EXP_ADC_PIN - czytanie z niego wartości z ADC (trzeba też to napisać tak żeby była możliwość połączenia tego z MIDI, np. wysyłanie komunikatu Control Change z wartością odczytaną z potencjometru) 
+//więc trzeba będzie to skwantować na 128 poziomów (0-127) 
 
