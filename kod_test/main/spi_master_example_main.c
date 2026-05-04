@@ -96,6 +96,139 @@ void Display_preset_name(const char* name) {
 }
 
 // ================= MIDI =================
+static const char* midi_status_string(uint8_t status) {
+    switch (status & 0xF0) {
+        case 0x80: return "Note Off";
+        case 0x90: return "Note On";
+        case 0xA0: return "Poly Pressure";
+        case 0xB0: return "Control Change";
+        case 0xC0: return "Program Change";
+        case 0xD0: return "Channel Pressure";
+        case 0xE0: return "Pitch Bend";
+        default:
+            switch (status) {
+                case 0xF0: return "SysEx Start";
+                case 0xF1: return "Time Code";
+                case 0xF2: return "Song Position";
+                case 0xF3: return "Song Select";
+                case 0xF6: return "Tune Request";
+                case 0xF7: return "SysEx End";
+                case 0xF8: return "Timing Clock";
+                case 0xFA: return "Start";
+                case 0xFB: return "Continue";
+                case 0xFC: return "Stop";
+                case 0xFE: return "Active Sensing";
+                case 0xFF: return "Reset";
+                default: return "Unknown";
+            }
+    }
+}
+
+static int midi_message_length(uint8_t status) {
+    switch (status & 0xF0) {
+        case 0xC0:
+        case 0xD0:
+            return 2;
+        case 0x80:
+        case 0x90:
+        case 0xA0:
+        case 0xB0:
+        case 0xE0:
+            return 3;
+        default:
+            switch (status) {
+                case 0xF1: return 2;
+                case 0xF2: return 3;
+                case 0xF3: return 2;
+                case 0xF6:
+                case 0xF7:
+                case 0xF8:
+                case 0xFA:
+                case 0xFB:
+                case 0xFC:
+                case 0xFE:
+                case 0xFF:
+                    return 1;
+                default: return 1;
+            }
+    }
+}
+
+static void log_midi_bytes(const char *label, const uint8_t *data, int len) {
+    int i = 0;
+    while (i < len) {
+        uint8_t status = data[i];
+        if (status & 0x80) {
+            int msg_len = midi_message_length(status);
+            const char *type = midi_status_string(status);
+            int channel = (status < 0xF0) ? (status & 0x0F) + 1 : -1;
+
+            if (i + msg_len > len) {
+                if (channel > 0) {
+                    ESP_LOGI(TAG, "%s -> truncated status=0x%02X type=%s channel=%d bytes=%d",
+                             label,
+                             status,
+                             type,
+                             channel,
+                             len - i);
+                } else {
+                    ESP_LOGI(TAG, "%s -> truncated status=0x%02X type=%s channel=n/a bytes=%d",
+                             label,
+                             status,
+                             type,
+                             len - i);
+                }
+                break;
+            }
+
+            if (msg_len == 1) {
+                if (channel > 0) {
+                    ESP_LOGI(TAG, "%s -> type=%s channel=%d",
+                             label,
+                             type,
+                             channel);
+                } else {
+                    ESP_LOGI(TAG, "%s -> type=%s channel=n/a",
+                             label,
+                             type);
+                }
+            } else if (msg_len == 2) {
+                if (channel > 0) {
+                    ESP_LOGI(TAG, "%s -> type=%s channel=%d code0=%d",
+                             label,
+                             type,
+                             channel,
+                             data[i + 1]);
+                } else {
+                    ESP_LOGI(TAG, "%s -> type=%s channel=n/a code0=%d",
+                             label,
+                             type,
+                             data[i + 1]);
+                }
+            } else {
+                if (channel > 0) {
+                    ESP_LOGI(TAG, "%s -> type=%s channel=%d code0=%d code1=%d",
+                             label,
+                             type,
+                             channel,
+                             data[i + 1],
+                             data[i + 2]);
+                } else {
+                    ESP_LOGI(TAG, "%s -> type=%s channel=n/a code0=%d code1=%d",
+                             label,
+                             type,
+                             data[i + 1],
+                             data[i + 2]);
+                }
+            }
+            i += msg_len;
+        } else {
+            ESP_LOGI(TAG, "%s -> running/data byte=0x%02X", label, status);
+            i++;
+        }
+    }
+}
+
 void MIDI_TX(uart_port_t uart_num, uint8_t channel, uint8_t pc_value) {
     uint8_t status = 0xC0 | (channel & 0x0F);
     uint8_t msg[2] = { status, pc_value & 0x7F };
@@ -110,14 +243,20 @@ static void MIDI_RX(void *arg) {
         uart_get_buffered_data_len(UART_NUM_1, &len1);
         if (len1 > 0) {
             int rx1 = uart_read_bytes(UART_NUM_1, data, sizeof(data), pdMS_TO_TICKS(10));
-            if (rx1 > 0) ESP_LOGI(TAG, "RX1 -> Otrzymano %d bajtów MIDI", rx1);
+            if (rx1 > 0) {
+                ESP_LOGI(TAG, "RX1 -> Otrzymano %d bajtów MIDI", rx1);
+                log_midi_bytes("RX1", data, rx1);
+            }
         }
 
         size_t len2 = 0;
         uart_get_buffered_data_len(UART_NUM_2, &len2);
         if (len2 > 0) {
             int rx2 = uart_read_bytes(UART_NUM_2, data, sizeof(data), pdMS_TO_TICKS(10));
-            if (rx2 > 0) ESP_LOGI(TAG, "RX2 -> Otrzymano %d bajtów MIDI", rx2);
+            if (rx2 > 0) {
+                ESP_LOGI(TAG, "RX2 -> Otrzymano %d bajtów MIDI", rx2);
+                log_midi_bytes("RX2", data, rx2);
+            }
         }
         
         vTaskDelay(pdMS_TO_TICKS(10)); // Non-blocking delay
@@ -154,7 +293,7 @@ void load_preset(int preset_idx) {
     Preset current = presety[preset_idx];
 
     update_relays(current.relay_flags);
-    // Przykładowo wysyłamy sygnał na UART1, ale możesz dostosować
+    // Przykładowo wysyłamy sygnał na UART2, ale możesz dostosować
     MIDI_TX(UART_NUM_2, 0, current.midi_pc); 
     Display_preset_name(current.name);
 }
