@@ -394,27 +394,32 @@ void app_main(void) {
     // Czyszczenie całej tablicy, zapobiega wyświetlaniu śmieci z pamięci
     memset(presety, 0, sizeof(presety));
 
+    // Automatyczne tworzenie nazw presetów
+    for(int i = 0; i < TOTAL_PRESETS; i++) {
+        int bank_num = (i / PRESETS_PER_BANK) + 1;
+        char preset_letter = 'A' + (i % PRESETS_PER_BANK);
+        sprintf(presety[i].name, "%d%c", bank_num, preset_letter);
+    }
+
     // Preset 0 (Bank 0, A)
-    strcpy(presety[0].name, "1A"); 
     presety[0].relay_flags = 0b0000000100000000; 
     presety[0].midi_pc = 10;
     presety[0].button_flags[0] = 0; 
 
     // Preset 1 (Bank 0, B)
-    strcpy(presety[1].name, "1B"); 
     presety[1].relay_flags = 0b0010001000100000; 
     presety[1].midi_pc = 11;
     presety[1].button_flags[1] = 0;
 
-    strcpy(presety[2].name, "1C"); 
+    // Preset 2 (Bank 0, C)
     presety[2].relay_flags = 0b1110001000100000; 
     presety[2].midi_pc = 11;
     presety[2].button_flags[1] = 0;
 
     // Preset 4 (Bank 2, A)
-    strcpy(presety[4].name, "2A"); 
     presety[4].relay_flags = 0b0000111100001000; 
     presety[4].midi_pc = 20;
+    presety[4].button_flags[1] = 0;
 
     load_preset(0);
 
