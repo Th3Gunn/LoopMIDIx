@@ -267,17 +267,22 @@ static void MIDI_RX(void *arg) {
 extern void esp_rom_delay_us(uint32_t us);
 
 void update_relays(uint16_t flags) {
+    // flags is 12 logical relay bits: [chip2 6 bits][chip1 6 bits]
+    uint16_t outgoing = ((flags & 0x3F) << 0)    // chip1 outputs A-F
+                      | ((flags >> 6) << 8);      // chip2 outputs A-F
+    // bits 6-7 and 14-15 remain 0
+
     gpio_set_level(SHIFT_LATCH_PIN, 0);
     gpio_set_level(SHIFT_CLOCK_PIN, 0);
-    
-    // Shift 16 bits for two daisy-chained 74HC595
+
     for (int i = 0; i < 16; i++) {
-        gpio_set_level(SHIFT_DATA_PIN, (flags >> i) & 0x1);
+        gpio_set_level(SHIFT_DATA_PIN, (outgoing >> i) & 1);
         gpio_set_level(SHIFT_CLOCK_PIN, 1);
         esp_rom_delay_us(1);
         gpio_set_level(SHIFT_CLOCK_PIN, 0);
         esp_rom_delay_us(1);
     }
+
     gpio_set_level(SHIFT_LATCH_PIN, 1);
     esp_rom_delay_us(1);
     gpio_set_level(SHIFT_LATCH_PIN, 0);
@@ -402,22 +407,22 @@ void app_main(void) {
     }
 
     // Preset 0 (Bank 0, A)
-    presety[0].relay_flags = 0b0000000100000000; 
+    presety[0].relay_flags = 0b0000000000000000; 
     presety[0].midi_pc = 10;
     presety[0].button_flags[0] = 0; 
 
     // Preset 1 (Bank 0, B)
-    presety[1].relay_flags = 0b0010001000100000; 
+    presety[1].relay_flags = 0b0010000000000000; 
     presety[1].midi_pc = 11;
     presety[1].button_flags[1] = 0;
 
     // Preset 2 (Bank 0, C)
-    presety[2].relay_flags = 0b1110001000100000; 
+    presety[2].relay_flags = 0b0011000000000000; 
     presety[2].midi_pc = 11;
     presety[2].button_flags[1] = 0;
 
     // Preset 4 (Bank 2, A)
-    presety[4].relay_flags = 0b0000111100001000; 
+    presety[4].relay_flags = 0b0000111100000000; 
     presety[4].midi_pc = 20;
     presety[4].button_flags[1] = 0;
 
@@ -427,10 +432,9 @@ void app_main(void) {
     xTaskCreate(MIDI_RX, "midi_rx_task", 4096, NULL, 4, NULL);
 }
 
-//teraz przełączanie relayów działa ale nie do końca - weź pod uwagę, że ostatnie 2 bity presety[].relay_flags odpowiadają za sterowanie 
-//przekaźnikami od AMP_SWCH_R i AMP_SWCH_T - poza tym pod każdy 74hc595 są podpięte tylko po 6 przekaźników
+
 //przyciski bank up/down powinny działać tak, że zmieniamy bank na wyższy ale jeszcze nie wybieramy presetu - zostajemy na starym i dopiero gdy wciśniemy przycisk 1-4 to wybieramy preset z nowego banku
 //dodaj logi na konsoli o zmianie banku i presetu
 //Można zacząć ogarniać EXP_ADC_PIN - czytanie z niego wartości z ADC (trzeba też to napisać tak żeby była możliwość połączenia tego z MIDI, np. wysyłanie komunikatu Control Change z wartością odczytaną z potencjometru) 
 //więc trzeba będzie to skwantować na 128 poziomów (0-127) 
-
+//do przeróbki flaga relay - aktualnie bity przypisane do przekażników to nnttttttttttttnn (t to przypisany przekaźnik) a powinno być ttttttttttttnnnn i potem na tych nie używanych bitach ustawić AMP_SWCH_R i AMP_SWCH_T
