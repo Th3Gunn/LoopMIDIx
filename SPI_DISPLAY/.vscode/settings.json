@@ -15,5 +15,6 @@
     "--background-index",
     "--query-driver=**",
     "--compile-commands-dir=c:\\Users\\cymes\\Documents\\MIDIxLoopSwitcher\\SPI_DISPLAY\\build"
-  ]
+  ],
+  "idf.currentSetup": "C:\\Users\\cymes\\esp\\v5.5.1\\esp-idf"
 }
