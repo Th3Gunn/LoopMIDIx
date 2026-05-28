@@ -8,6 +8,9 @@
 #include "driver/spi_master.h"
 #include "esp_log.h"
 #include "esp_adc/adc_oneshot.h" 
+// DODANO NAGŁÓWKI DLA OBSŁUGI PAMIĘCI FLASH (NVS)
+#include "nvs_flash.h"
+#include "nvs.h"
         
 static const char *TAG = "MIDI_SWITCHER";
 
@@ -105,6 +108,8 @@ void load_preset(int preset_idx);
 void update_menu_display(void);
 void MIDI_TX(uart_port_t uart_num, uint8_t channel, uint8_t pc_value);
 void Display_preset_name(const char* name, int cursor_pos);
+void save_presets_to_flash(void);
+void load_presets_from_flash(void);
 
 // Display MAX7219 Drivers
 uint8_t get_char_segment(char c) {
@@ -133,13 +138,12 @@ void max7219_send(uint8_t reg, uint8_t data) {
     spi_device_transmit(spi_max, &t);
 }
 
-// Dodano obsługę kursora sprzętowego (kropka dziesiętna)
 void Display_preset_name(const char* name, int cursor_pos) {
     for(int i = 1; i <= 8; i++) max7219_send(i, 0x00);
     for (int i = 0; i < 8; i++) {
         if (name[i] == '\0') break;
         uint8_t seg = get_char_segment(name[i]);
-        if (i == cursor_pos) seg |= 0x80; // Podświetlenie kropki dziesiętnej
+        if (i == cursor_pos) seg |= 0x80; 
         max7219_send(8 - i, seg); 
     }
 }
@@ -292,7 +296,6 @@ void update_menu_display(void) {
     }
     
     if (menu_current_item == 0) { 
-        // Generowanie formatu: L1 1010, L2 0100, L3 1111 (3 części x 4 bity = bity od 4 do 15)
         int part = menu_bit_cursor / 4; 
         int start_bit = 4 + (part * 4); 
         snprintf(buf, sizeof(buf), "L%d  %d%d%d%d", part + 1,
@@ -301,7 +304,6 @@ void update_menu_display(void) {
                  (menu_temp_val >> (start_bit + 2)) & 1,
                  (menu_temp_val >> (start_bit + 3)) & 1);
         
-        // Obliczanie pozycji dla postawienia kropki dziesiętnej (kursor) na jednym z czterech ostatnich znaków
         int cursor_on_screen = 4 + (menu_bit_cursor % 4); 
         Display_preset_name(buf, cursor_on_screen); 
     }
@@ -384,7 +386,7 @@ static void Handle_Buttons_Task(void* arg) {
                 (menu_target_dir == 0 ? &edit_p->m1_rx : &edit_p->m1_tx) : 
                 (menu_target_dir == 0 ? &edit_p->m2_rx : &edit_p->m2_tx);
 
-            // BTN 4 (RIGHT) - Scroll kursora bitów w prawo
+            // BTN 4 (RIGHT)
             if (!current_state[3] && last_state[3]) {
                 if (menu_current_item == 0 && menu_sub_step == 1) {
                     menu_bit_cursor = (menu_bit_cursor + 1) % 12;
@@ -392,7 +394,7 @@ static void Handle_Buttons_Task(void* arg) {
                 }
             }
 
-            // BTN 3 (LEFT) - Scroll kursora bitów w lewo
+            // BTN 3 (LEFT)
             if (!current_state[2] && last_state[2]) {
                 if (menu_current_item == 0 && menu_sub_step == 1) {
                     menu_bit_cursor = (menu_bit_cursor > 0) ? menu_bit_cursor - 1 : 11;
@@ -400,13 +402,13 @@ static void Handle_Buttons_Task(void* arg) {
                 }
             }
 
-            // BTN 6 (BANK UP / VALUE UP / SET BIT TO 1)
+            // BTN 6 (BANK UP / VALUE UP)
             if (!current_state[5] && last_state[5]) {
                 if (menu_sub_step == 0) {
                     menu_current_item = (menu_current_item + 1) % 5;
                 } else {
                     if (menu_current_item == 0) { 
-                        menu_temp_val |= (1 << (4 + menu_bit_cursor)); // Set bit to 1
+                        menu_temp_val |= (1 << (4 + menu_bit_cursor)); 
                     } 
                     else if (menu_current_item == 1) { 
                         menu_temp_val = (menu_temp_val + 1) % 4;
@@ -425,13 +427,13 @@ static void Handle_Buttons_Task(void* arg) {
                 update_menu_display();
             }
 
-            // BTN 5 (BANK DOWN / VALUE DOWN / SET BIT TO 0)
+            // BTN 5 (BANK DOWN / VALUE DOWN)
             if (!current_state[4] && last_state[4]) {
                 if (menu_sub_step == 0) {
                     menu_current_item = (menu_current_item > 0) ? menu_current_item - 1 : 4;
                 } else {
                     if (menu_current_item == 0) { 
-                        menu_temp_val &= ~(1 << (4 + menu_bit_cursor)); // Set bit to 0
+                        menu_temp_val &= ~(1 << (4 + menu_bit_cursor)); 
                     } 
                     else if (menu_current_item == 1) { 
                         menu_temp_val = (menu_temp_val > 0) ? menu_temp_val - 1 : 3;
@@ -444,13 +446,13 @@ static void Handle_Buttons_Task(void* arg) {
                     } 
                     else if (menu_current_item == 4) { 
                         if (menu_sub_step == 1)      menu_temp_val = (menu_temp_val > 0) ? menu_temp_val - 1 : 15; 
-                        else if (menu_sub_step == 2 && menu_temp_val > 0) menu_temp_val--;                         
+                        else if (menu_sub_step == 2 && menu_temp_val > 0) menu_temp_val--;                                                 
                     }
                 }
                 update_menu_display();
             }
 
-            // BTN 1 (PRESET A - ENTER)
+            // BTN 1 (PRESET A - ENTER) -> Zmodyfikowano, aby zapisywał zmiany do pamięci Flash
             if (!current_state[0] && last_state[0]) {
                 if (menu_sub_step == 0) { 
                     menu_sub_step = 1;
@@ -459,26 +461,33 @@ static void Handle_Buttons_Task(void* arg) {
                     if (menu_current_item == 2 || menu_current_item == 3) menu_target_dir = 0; 
                     if (menu_current_item == 4) menu_temp_val = edit_p->exp_channel;
                 } else {
+                    bool data_committed = false; // Flaga pomocnicza informująca o zapisie danej sekcji
+
                     if (menu_current_item == 0) { 
-                        // Zapis wyłącznie bitów 4-15 (Pętle), ochrona bitów 0-3
                         edit_p->relay_flags = (edit_p->relay_flags & 0x000F) | (menu_temp_val & 0xFFF0); 
                         menu_sub_step = 0; 
+                        data_committed = true;
                     }
                     else if (menu_current_item == 1) { 
-                        // Zapis wyłącznie bitów 0-1 (Amp Switch), ochrona bitów pętli
                         edit_p->relay_flags = (edit_p->relay_flags & 0xFFFC) | (menu_temp_val & 0x0003); 
                         menu_sub_step = 0; 
+                        data_committed = true;
                     }
                     else if (menu_current_item == 2 || menu_current_item == 3) { 
                         if (menu_sub_step == 1) { menu_sub_step = 2; menu_temp_val = msg->type; }
-                        else if (menu_sub_step == 2) { msg->type = menu_temp_val; if(menu_temp_val == MIDI_MSG_NONE) menu_sub_step = 0; else { menu_sub_step = 3; menu_temp_val = msg->channel; } }
+                        else if (menu_sub_step == 2) { msg->type = menu_temp_val; if(menu_temp_val == MIDI_MSG_NONE) { menu_sub_step = 0; data_committed = true; } else { menu_sub_step = 3; menu_temp_val = msg->channel; } }
                         else if (menu_sub_step == 3) { msg->channel = menu_temp_val; menu_sub_step = 4; menu_temp_val = msg->data1; }
-                        else if (menu_sub_step == 4) { msg->data1 = menu_temp_val; if(msg->type == MIDI_MSG_PC) menu_sub_step = 0; else { menu_sub_step = 5; menu_temp_val = msg->data2; } }
-                        else if (menu_sub_step == 5) { msg->data2 = menu_temp_val; menu_sub_step = 0; }
+                        else if (menu_sub_step == 4) { msg->data1 = menu_temp_val; if(msg->type == MIDI_MSG_PC) { menu_sub_step = 0; data_committed = true; } else { menu_sub_step = 5; menu_temp_val = msg->data2; } }
+                        else if (menu_sub_step == 5) { msg->data2 = menu_temp_val; menu_sub_step = 0; data_committed = true; }
                     }
                     else if (menu_current_item == 4) { 
                         if (menu_sub_step == 1) { edit_p->exp_channel = menu_temp_val; menu_sub_step = 2; menu_temp_val = edit_p->exp_cc_num; }
-                        else if (menu_sub_step == 2) { edit_p->exp_cc_num = menu_temp_val; menu_sub_step = 0; }
+                        else if (menu_sub_step == 2) { edit_p->exp_cc_num = menu_temp_val; menu_sub_step = 0; data_committed = true; }
+                    }
+
+                    // Jeśli użytkownik zatwierdził pełne ustawienie, zrzuć cały RAM do Flash
+                    if (data_committed) {
+                        save_presets_to_flash();
                     }
                 }
                 update_menu_display();
@@ -586,31 +595,83 @@ void hw_init() {
     adc_oneshot_chan_cfg_t adc_config = { .bitwidth = ADC_BITWIDTH_12, .atten = ADC_ATTEN_DB_12 }; adc_oneshot_config_channel(adc1_handle, ADC_CHANNEL_3, &adc_config);
 }
 
+// NOWA FUNKCJA: Zapis tablicy z RAMu do pamięci Flash (NVS Blob)
+void save_presets_to_flash(void) {
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open("storage", NVS_READWRITE, &nvs_handle);
+    if (err == ESP_OK) {
+        err = nvs_set_blob(nvs_handle, "presets_data", presety, sizeof(presety));
+        if (err == ESP_OK) {
+            err = nvs_commit(nvs_handle);
+            if (err == ESP_OK) {
+                ESP_LOGI(TAG, "Wszystkie presety zapisane pomyślnie we Flash!");
+            }
+        }
+        nvs_close(nvs_handle);
+    } else {
+        ESP_LOGE(TAG, "Błąd zapisu! Nie można otworzyć NVS.");
+    }
+}
+
+// NOWA FUNKCJA: Ładowanie z Flash do RAM / Generowanie fabrycznych
+void load_presets_from_flash(void) {
+    // 1. Inicjalizacja pamięci NVS
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        err = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(err);
+
+    // 2. Próba odczytu danych
+    nvs_handle_t nvs_handle;
+    err = nvs_open("storage", NVS_READWRITE, &nvs_handle);
+    if (err == ESP_OK) {
+        size_t required_size = sizeof(presety);
+        err = nvs_get_blob(nvs_handle, "presets_data", presety, &required_size);
+        
+        if (err == ESP_OK) {
+            ESP_LOGI(TAG, "Dane odnalezione. Załadowano presety z Flash do RAMu.");
+        } 
+        else if (err == ESP_ERR_NVS_NOT_FOUND) {
+            ESP_LOGW(TAG, "Brak danych we Flash (czysta pamięć). Generowanie wartości fabrycznych...");
+            
+            // Przeniesiono pętlę generującą domyślne ustawienia
+            for (int b = 0; b < NUM_BANKS; b++) {
+                for (int p = 0; p < PRESETS_PER_BANK; p++) {
+                    int idx = (b * PRESETS_PER_BANK) + p;
+                    snprintf(presety[idx].name, sizeof(presety[idx].name), "%d%c", b + 1, 'A' + p);
+                    presety[idx].relay_flags = 0x0800 + (b * 0x1000) + (p * 0x0400);
+                    
+                    presety[idx].m1_tx.type = MIDI_MSG_PC; presety[idx].m1_tx.channel = 0; presety[idx].m1_tx.data1 = 10 + idx;
+                    presety[idx].m1_rx.type = MIDI_MSG_PC; presety[idx].m1_rx.channel = 0; presety[idx].m1_rx.data1 = 10 + idx;
+                    presety[idx].m2_tx.type = MIDI_MSG_PC; presety[idx].m2_tx.channel = 0; presety[idx].m2_tx.data1 = 10 + idx;
+                    presety[idx].m2_rx.type = MIDI_MSG_PC; presety[idx].m2_rx.channel = 0; presety[idx].m2_rx.data1 = 10 + idx;
+
+                    presety[idx].extra_btn_modes[0] = BTN_MODE_SUB_PATCH;   
+                    presety[idx].extra_btn_modes[1] = BTN_MODE_TAP_TEMPO;   
+                    presety[idx].extra_btn_modes[2] = BTN_MODE_MOMENTARY;   
+                    presety[idx].extra_btn_modes[3] = BTN_MODE_STOMP_TOGGLE; 
+                    
+                    presety[idx].exp_channel = 0; 
+                    presety[idx].exp_cc_num = 11; 
+                }
+            }
+            // Zapisujemy nowo utworzone presety fabryczne, aby były gotowe na kolejny restart
+            nvs_set_blob(nvs_handle, "presets_data", presety, sizeof(presety));
+            nvs_commit(nvs_handle);
+        }
+        nvs_close(nvs_handle);
+    }
+}
+
 void app_main(void) {
     hw_init();
     gpio_set_level(OE_PIN, 0); gpio_set_level(SRCLR_PIN, 1);
     memset(presety, 0, sizeof(presety));
 
-    for (int b = 0; b < NUM_BANKS; b++) {
-        for (int p = 0; p < PRESETS_PER_BANK; p++) {
-            int idx = (b * PRESETS_PER_BANK) + p;
-            snprintf(presety[idx].name, sizeof(presety[idx].name), "%d%c", b + 1, 'A' + p);
-            presety[idx].relay_flags = 0x0800 + (b * 0x1000) + (p * 0x0400);
-            
-            presety[idx].m1_tx.type = MIDI_MSG_PC; presety[idx].m1_tx.channel = 0; presety[idx].m1_tx.data1 = 10 + idx;
-            presety[idx].m1_rx.type = MIDI_MSG_PC; presety[idx].m1_rx.channel = 0; presety[idx].m1_rx.data1 = 10 + idx;
-            presety[idx].m2_tx.type = MIDI_MSG_PC; presety[idx].m2_tx.channel = 0; presety[idx].m2_tx.data1 = 10 + idx;
-            presety[idx].m2_rx.type = MIDI_MSG_PC; presety[idx].m2_rx.channel = 0; presety[idx].m2_rx.data1 = 10 + idx;
-
-            presety[idx].extra_btn_modes[0] = BTN_MODE_SUB_PATCH;   
-            presety[idx].extra_btn_modes[1] = BTN_MODE_TAP_TEMPO;   
-            presety[idx].extra_btn_modes[2] = BTN_MODE_MOMENTARY;   
-            presety[idx].extra_btn_modes[3] = BTN_MODE_STOMP_TOGGLE; 
-            
-            presety[idx].exp_channel = 0; 
-            presety[idx].exp_cc_num = 11; 
-        }
-    }
+    // WYWOŁANIE NOWEGO MECHANIZMU PAMIĘCI
+    load_presets_from_flash();
 
     load_preset(0);
     xTaskCreate(Handle_Buttons_Task, "buttons_task", 4096, NULL, 5, NULL);
