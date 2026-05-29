@@ -114,11 +114,12 @@ uint8_t get_char_segment(char c) {
         case 'A': return 0x77; case 'B': return 0x1F; 
         case 'C': return 0x4E; case 'D': return 0x3D; 
         case 'E': return 0x4F; case 'F': return 0x47;
+        case 'I': return 0x04;
         case 'L': return 0x0E; case 'P': return 0x67;
-        case 'S': return 0x5B; case 'U': return 0x3E;
-        case 'H': return 0x37; case 'X': return 0x37;
+        case 'S': return 0x5B; case 'U': return 0x1C;
+        case 'H': return 0x17; case 'X': return 0x37;
         case 'M': return 0x76; case 'T': return 0x0F;
-        case 'R': return 0x05; case 'N': return 0x37; 
+        case 'R': return 0x05; case 'N': return 0x15; 
         case 'O': return 0x7E; case 'Y': return 0x3B;
         case '-': return 0x01; case '_': return 0x08;
         case ' ': return 0x00; default: return 0x00;
@@ -273,8 +274,7 @@ void process_midi_byte(uint8_t byte, uart_port_t uart_num)
                             return;
                         }
 
-                        ESP_LOGW(TAG,
-                                 "[RX%d] Zdalna aktywacja presetu %d%c", idx + 1, (i / PRESETS_PER_BANK) + 1, 'A' + (i % PRESETS_PER_BANK));
+                        ESP_LOGW(TAG, "[RX%d] Zdalna aktywacja presetu %d%c", idx + 1, (i / PRESETS_PER_BANK) + 1, 'A' + (i % PRESETS_PER_BANK));
 
                         load_preset(i);
                         state[idx] = 0;
@@ -303,11 +303,34 @@ void update_relays(uint16_t flags) {
     gpio_set_level(AMP_SWCH_R, (flags >> 0) & 0x1); 
     gpio_set_level(AMP_SWCH_T, (flags >> 1) & 0x1); 
     gpio_set_level(SHIFT_LATCH_PIN, 0); gpio_set_level(SHIFT_CLOCK_PIN, 0);
-    for (int i = 0; i < 16; i++) {
-        gpio_set_level(SHIFT_DATA_PIN, (flags >> i) & 0x1); gpio_set_level(SHIFT_CLOCK_PIN, 1);
-        esp_rom_delay_us(1); gpio_set_level(SHIFT_CLOCK_PIN, 0); esp_rom_delay_us(1);
+    for (int i = 4; i < 10; i++) {
+        gpio_set_level(SHIFT_DATA_PIN, (flags >> i) & 0x1); 
+        gpio_set_level(SHIFT_CLOCK_PIN, 1);
+        esp_rom_delay_us(1); 
+        gpio_set_level(SHIFT_CLOCK_PIN, 0); 
+        esp_rom_delay_us(1);
+    }
+    for(int i = 2; i < 4; i++) {
+        gpio_set_level(SHIFT_DATA_PIN, (flags >> i) & 0x1); 
+        gpio_set_level(SHIFT_CLOCK_PIN, 1);
+        esp_rom_delay_us(1); 
+        gpio_set_level(SHIFT_CLOCK_PIN, 0); 
+        esp_rom_delay_us(1);
+    }
+    for (int i = 10; i < 16; i++) {
+        gpio_set_level(SHIFT_DATA_PIN, (flags >> i) & 0x1); 
+        gpio_set_level(SHIFT_CLOCK_PIN, 1);
+        esp_rom_delay_us(1); 
+        gpio_set_level(SHIFT_CLOCK_PIN, 0); 
+        esp_rom_delay_us(1);
     }
     gpio_set_level(SHIFT_LATCH_PIN, 1); esp_rom_delay_us(1); gpio_set_level(SHIFT_LATCH_PIN, 0);
+    ESP_LOGW(TAG, "Relays updated: 0x%04X (bits: %d%d%d%d%d%d%d%d%d%d%d%d%d%d%d%d)",
+        flags,
+        (flags>>15)&1, (flags>>14)&1, (flags>>13)&1, (flags>>12)&1,
+        (flags>>11)&1, (flags>>10)&1, (flags>>9)&1, (flags>>8)&1,
+        (flags>>7)&1, (flags>>6)&1, (flags>>5)&1, (flags>>4)&1,
+        (flags>>3)&1, (flags>>2)&1, (flags>>1)&1, (flags>>0)&1);
 }
 
 // Switcher Logic
@@ -335,8 +358,8 @@ void update_menu_display(void) {
     if (menu_sub_step == 0) {
         const char* menu_names[] = {
             "L00PS ", "A-SUUTCH", 
-            "M1D1-  1", "M1D1-  2", "M1D1-  3", "M1D1-  4", "M1D1-  5", 
-            "M1D1-  6", "M1D1-  7", "M1D1-  8", "M1D1-  9", "M1D1- 10",
+            "NNIDI- 1", "NN1D1- 2", "NNIDI- 3", "NNIDI- 4", "NNIDI- 5", 
+            "NNIDI- 6", "NNIDI- 7", "NNIDI- 8", "NNIDI- 9", "NNIDI-10",
             "EXP PDL"  
         };
         display_menu_text(menu_names[menu_current_item], -1);
@@ -358,9 +381,9 @@ void update_menu_display(void) {
     else if (menu_current_item == 1) {
         switch(menu_temp_val) {
             case 0:  display_menu_text("N0NE    ", -1); break; 
-            case 1:  display_menu_text("R1N9    ", -1); break; 
-            case 2:  display_menu_text("T1P     ", -1); break; 
-            case 3:  display_menu_text("T1P_R1N9", -1); break; 
+            case 1:  display_menu_text("RIN9    ", -1); break; 
+            case 2:  display_menu_text("TIP     ", -1); break; 
+            case 3:  display_menu_text("TIP_RIN9", -1); break; 
             default: break;
         }
     }
