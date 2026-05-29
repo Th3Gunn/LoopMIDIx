@@ -4,7 +4,7 @@
   "idf.openOcdConfigs": [
     "board/esp32s3-builtin.cfg"
   ],
-  "idf.currentSetup": "I:/esp_idf/",
+  "idf.currentSetup": "C:\\Users\\cymes\\esp\\v5.5.1\\esp-idf",
   "idf.customExtraVars": {
     "IDF_TARGET": "esp32s3"
   },
