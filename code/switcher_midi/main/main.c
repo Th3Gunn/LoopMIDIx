@@ -3,11 +3,15 @@
 #include <ctype.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_err.h"
 #include "driver/gpio.h"
 #include "driver/uart.h"
 #include "driver/spi_master.h"
 #include "esp_log.h"
 #include "esp_adc/adc_oneshot.h" 
+#include "tinyusb.h"
+#include "tinyusb_default_config.h"
+#include "sdkconfig.h"
 #include "nvs_flash.h"
 #include "nvs.h"
         
@@ -65,7 +69,7 @@ typedef struct {
     uint8_t data1;   
     uint8_t data2;   
     uint8_t is_tx;    // 1 = TX (Wysyłana), 0 = RX (Odbierana/Aktywująca)
-    uint8_t uart_num; // 1 = UART_NUM_1, 2 = UART_NUM_2
+    uint8_t uart_num; // 1 = UART_NUM_1, 2 = UART_NUM_2, 3 = USB MIDI
 } MidiMessageConfig;
 
 
@@ -96,6 +100,44 @@ uint8_t menu_bit_cursor = 0;
 static spi_device_handle_t spi_max;
 static adc_oneshot_unit_handle_t adc1_handle; 
 
+#define MIDI_SOURCE_UART1 1
+#define MIDI_SOURCE_UART2 2
+#define MIDI_SOURCE_USB   3
+
+#if CONFIG_TINYUSB_ENABLED && CFG_TUD_MIDI
+enum {
+    USB_MIDI_ITF_NUM = 0,
+    USB_MIDI_ITF_STREAMING,
+    USB_MIDI_ITF_COUNT
+};
+
+enum {
+    USB_MIDI_EP_NUM = 0,
+};
+
+#define USB_MIDI_DESCRIPTOR_TOTAL_LEN (TUD_CONFIG_DESC_LEN + CFG_TUD_MIDI * TUD_MIDI_DESC_LEN)
+
+static const char *usb_midi_string_desc[] = {
+    (char[]){0x09, 0x04},
+    "Switcher MIDI",
+    "Switcher MIDI Device",
+    "123456",
+    "USB MIDI",
+};
+
+static const uint8_t usb_midi_fs_config_desc[] = {
+    TUD_CONFIG_DESCRIPTOR(1, USB_MIDI_ITF_COUNT, 0, USB_MIDI_DESCRIPTOR_TOTAL_LEN, 0, 100),
+    TUD_MIDI_DESCRIPTOR(USB_MIDI_ITF_NUM, 4, USB_MIDI_EP_NUM, (0x80 | USB_MIDI_EP_NUM), 64),
+};
+
+#if (TUD_OPT_HIGH_SPEED)
+static const uint8_t usb_midi_hs_config_desc[] = {
+    TUD_CONFIG_DESCRIPTOR(1, USB_MIDI_ITF_COUNT, 0, USB_MIDI_DESCRIPTOR_TOTAL_LEN, 0, 100),
+    TUD_MIDI_DESCRIPTOR(USB_MIDI_ITF_NUM, 4, USB_MIDI_EP_NUM, (0x80 | USB_MIDI_EP_NUM), 512),
+};
+#endif
+#endif
+
 // Function Prototypes
 void load_preset(int preset_idx);
 void update_menu_display(void);
@@ -103,6 +145,8 @@ void update_live_display(void);
 void MIDI_TX(uart_port_t uart_num, uint8_t channel, uint8_t pc_value);
 void save_preset_to_flash(int idx);
 void load_presets_from_flash(void);
+static void midi_write_bytes(uint8_t target, const uint8_t *msg, size_t len);
+static void process_midi_byte(uint8_t byte, uint8_t midi_source);
 
 // Display MAX7219 Drivers
 uint8_t get_char_segment(char c) {
@@ -162,13 +206,42 @@ void update_live_display(void) {
 }
 
 // MIDI Transmitters
+static const char *midi_source_name(uint8_t midi_source)
+{
+    switch (midi_source) {
+        case MIDI_SOURCE_UART1: return "UART1";
+        case MIDI_SOURCE_UART2: return "UART2";
+        case MIDI_SOURCE_USB: return "USB";
+        default: return "UNKNOWN";
+    }
+}
+
+static void midi_write_bytes(uint8_t target, const uint8_t *msg, size_t len)
+{
+    if (target == MIDI_SOURCE_USB) {
+#if CONFIG_TINYUSB_ENABLED && CFG_TUD_MIDI
+        if (tud_midi_mounted()) {
+            tud_midi_stream_write(0, msg, len);
+        } else {
+            ESP_LOGW(TAG, "USB MIDI not mounted, dropping %u bytes", (unsigned)len);
+        }
+#else
+        ESP_LOGW(TAG, "USB MIDI support is disabled at build time");
+#endif
+        return;
+    }
+
+    uart_port_t uart_port = (target == MIDI_SOURCE_UART2) ? UART_NUM_2 : UART_NUM_1;
+    uart_write_bytes(uart_port, (const char *)msg, len);
+}
+
 void MIDI_TX(uart_port_t uart_num, uint8_t channel, uint8_t pc_value) {
     uint8_t status = 0xC0 | (channel & 0x0F);
     uint8_t msg[2] = { status, pc_value & 0x7F };
-    uart_write_bytes(uart_num, (const char *)msg, 2);
+    midi_write_bytes((uint8_t)uart_num, msg, 2);
 }
 
-void send_flexible_midi(uart_port_t uart_num, MidiMessageConfig cfg) {
+void send_flexible_midi(uint8_t midi_target, MidiMessageConfig cfg) {
     if (cfg.type == MIDI_MSG_NONE) return;
     uint8_t status = 0;
     uint8_t msg[3];
@@ -178,31 +251,42 @@ void send_flexible_midi(uart_port_t uart_num, MidiMessageConfig cfg) {
         case MIDI_MSG_PC:
             status = 0xC0 | (cfg.channel & 0x0F);
             msg[0] = status; msg[1] = cfg.data1 & 0x7F; len = 2;
-            ESP_LOGI(TAG, "TX UART%d -> PC: %d, Ch: %d", (uart_num == UART_NUM_1 ? 1 : 2), cfg.data1, cfg.channel + 1);
+            ESP_LOGI(TAG, "TX %s -> PC: %d, Ch: %d", midi_source_name(midi_target), cfg.data1, cfg.channel + 1);
             break;
         case MIDI_MSG_CC:
             status = 0xB0 | (cfg.channel & 0x0F);
             msg[0] = status; msg[1] = cfg.data1 & 0x7F; msg[2] = cfg.data2 & 0x7F; len = 3;
-            ESP_LOGI(TAG, "TX UART%d -> CC: #%d, Val: %d, Ch: %d", (uart_num == UART_NUM_1 ? 1 : 2), cfg.data1, cfg.data2, cfg.channel + 1);
+            ESP_LOGI(TAG, "TX %s -> CC: #%d, Val: %d, Ch: %d", midi_source_name(midi_target), cfg.data1, cfg.data2, cfg.channel + 1);
             break;
     }
-    if (len > 0) uart_write_bytes(uart_num, (const char *)msg, len);
+    if (len > 0) midi_write_bytes(midi_target, msg, len);
 }
 
 void MIDI_CC_TX(uart_port_t uart_num, uint8_t channel, uint8_t cc_num, uint8_t cc_value) {
     uint8_t status = 0xB0 | (channel & 0x0F);
     uint8_t msg[3] = { status, cc_num & 0x7F, cc_value & 0x7F };
-    uart_write_bytes(uart_num, (const char *)msg, 3);
+    midi_write_bytes((uint8_t)uart_num, msg, 3);
 }
 
 // MIDI Receiver Parser (PC + CC only)
-void process_midi_byte(uint8_t byte, uart_port_t uart_num)
+static int midi_source_index(uint8_t midi_source)
 {
-    static uint8_t status[2] = {0, 0};
-    static uint8_t data1[2]  = {0, 0};
-    static int state[2]      = {0, 0};
+    switch (midi_source) {
+        case MIDI_SOURCE_UART2: return 1;
+        case MIDI_SOURCE_USB: return 2;
+        case MIDI_SOURCE_UART1:
+        default:
+            return 0;
+    }
+}
 
-    int idx = (uart_num == UART_NUM_1) ? 0 : 1;
+static void process_midi_byte(uint8_t byte, uint8_t midi_source)
+{
+    static uint8_t status[3] = {0, 0, 0};
+    static uint8_t data1[3]  = {0, 0, 0};
+    static int state[3]      = {0, 0, 0};
+
+    int idx = midi_source_index(midi_source);
 
     // Status byte
     if (byte >= 0x80) {
@@ -225,9 +309,7 @@ void process_midi_byte(uint8_t byte, uart_port_t uart_num)
 
                     if (rx_cfg.is_tx == 0 &&rx_cfg.type == MIDI_MSG_PC)
                     {
-                        uart_port_t expected_uart =
-                            (rx_cfg.uart_num == 2) ? UART_NUM_2 : UART_NUM_1;
-                        if (uart_num == expected_uart &&
+                        if (midi_source == rx_cfg.uart_num &&
                             rx_cfg.channel == ch &&
                             rx_cfg.data1 == data1[idx])
                         {
@@ -263,8 +345,7 @@ void process_midi_byte(uint8_t byte, uart_port_t uart_num)
                 MidiMessageConfig rx_cfg = presety[i].midi_msgs[m];
                 if (rx_cfg.is_tx == 0 &&rx_cfg.type == MIDI_MSG_CC)
                 {
-                    uart_port_t expected_uart =(rx_cfg.uart_num == 2) ? UART_NUM_2 : UART_NUM_1;
-                    if (uart_num == expected_uart &&
+                    if (midi_source == rx_cfg.uart_num &&
                         rx_cfg.channel == ch &&
                         rx_cfg.data1 == data1[idx] &&
                         rx_cfg.data2 == data2)
@@ -288,11 +369,37 @@ void process_midi_byte(uint8_t byte, uart_port_t uart_num)
     }
 }
 
+#if CONFIG_TINYUSB_ENABLED && CFG_TUD_MIDI
+static void usb_midi_dispatch_packet(const uint8_t packet[4])
+{
+    uint8_t cin = packet[0] & 0x0F;
+
+    if (cin == 0x0B) {
+        process_midi_byte(packet[1], MIDI_SOURCE_USB);
+        process_midi_byte(packet[2], MIDI_SOURCE_USB);
+        process_midi_byte(packet[3], MIDI_SOURCE_USB);
+    } else if (cin == 0x0C) {
+        process_midi_byte(packet[1], MIDI_SOURCE_USB);
+        process_midi_byte(packet[2], MIDI_SOURCE_USB);
+    }
+}
+#endif
+
 static void MIDI_RX_Task(void *arg) {
     uint8_t byte;
     while (1) {
-        while (uart_read_bytes(UART_NUM_1, &byte, 1, 0) > 0) process_midi_byte(byte, UART_NUM_1);
-        while (uart_read_bytes(UART_NUM_2, &byte, 1, 0) > 0) process_midi_byte(byte, UART_NUM_2);
+#if CONFIG_TINYUSB_ENABLED && CFG_TUD_MIDI
+        uint8_t packet[4];
+#endif
+        while (uart_read_bytes(UART_NUM_1, &byte, 1, 0) > 0) process_midi_byte(byte, MIDI_SOURCE_UART1);
+        while (uart_read_bytes(UART_NUM_2, &byte, 1, 0) > 0) process_midi_byte(byte, MIDI_SOURCE_UART2);
+#if CONFIG_TINYUSB_ENABLED && CFG_TUD_MIDI
+        while (tud_midi_available()) {
+            if (tud_midi_packet_read(packet)) {
+                usb_midi_dispatch_packet(packet);
+            }
+        }
+#endif
         vTaskDelay(1); 
     }
 }
@@ -343,8 +450,7 @@ void load_preset(int preset_idx) {
     
     for (int i = 0; i < 10; i++) {
         if (current.midi_msgs[i].is_tx == 1 && current.midi_msgs[i].type != MIDI_MSG_NONE) {
-            uart_port_t uart = (current.midi_msgs[i].uart_num == 2) ? UART_NUM_2 : UART_NUM_1;
-            send_flexible_midi(uart, current.midi_msgs[i]);
+            send_flexible_midi(current.midi_msgs[i].uart_num, current.midi_msgs[i]);
         }
     }
     
@@ -480,7 +586,7 @@ static void Handle_Buttons_Task(void* arg) {
                     else if (menu_current_item == 1) menu_temp_val = (menu_temp_val + 1) % 4;
                     else if (menu_current_item >= 2 && menu_current_item <= 11) { 
                         if (menu_sub_step == 1)      menu_temp_val = (menu_temp_val + 1) % 2; 
-                        else if (menu_sub_step == 2) menu_temp_val = (menu_temp_val == 1) ? 2 : 1; 
+                        else if (menu_sub_step == 2) menu_temp_val = (menu_temp_val >= 3) ? 1 : menu_temp_val + 1; 
                         else if (menu_sub_step == 3) menu_temp_val = (menu_temp_val + 1) % 3;
                         else if (menu_sub_step == 4) menu_temp_val = (menu_temp_val + 1) % 16;
                         else if ((menu_sub_step == 5 || menu_sub_step == 6) && menu_temp_val < 127) menu_temp_val++;
@@ -501,7 +607,7 @@ static void Handle_Buttons_Task(void* arg) {
                     else if (menu_current_item == 1) menu_temp_val = (menu_temp_val > 0) ? menu_temp_val - 1 : 3;
                     else if (menu_current_item >= 2 && menu_current_item <= 11) { 
                         if (menu_sub_step == 1)      menu_temp_val = (menu_temp_val > 0) ? menu_temp_val - 1 : 1;
-                        else if (menu_sub_step == 2) menu_temp_val = (menu_temp_val == 2) ? 1 : 2;
+                        else if (menu_sub_step == 2) menu_temp_val = (menu_temp_val <= 1) ? 3 : menu_temp_val - 1;
                         else if (menu_sub_step == 3) menu_temp_val = (menu_temp_val > 0) ? menu_temp_val - 1 : 4;
                         else if (menu_sub_step == 4) menu_temp_val = (menu_temp_val > 0) ? menu_temp_val - 1 : 15;
                         else if ((menu_sub_step == 5 || menu_sub_step == 6) && menu_temp_val > 0) menu_temp_val--;
@@ -770,9 +876,26 @@ void app_main(void) {
     gpio_set_level(SRCLR_PIN, 1);
     memset(presety, 0, sizeof(presety));
 
+#if CONFIG_TINYUSB_ENABLED && CFG_TUD_MIDI
+    ESP_LOGI(TAG, "USB MIDI initialization");
+    tinyusb_config_t tusb_cfg = TINYUSB_DEFAULT_CONFIG();
+    tusb_cfg.descriptor.string = usb_midi_string_desc;
+    tusb_cfg.descriptor.string_count = sizeof(usb_midi_string_desc) / sizeof(usb_midi_string_desc[0]);
+    tusb_cfg.descriptor.full_speed_config = usb_midi_fs_config_desc;
+#if (TUD_OPT_HIGH_SPEED)
+    tusb_cfg.descriptor.high_speed_config = usb_midi_hs_config_desc;
+    tusb_cfg.descriptor.qualifier = NULL;
+#endif
+    ESP_ERROR_CHECK(tinyusb_driver_install(&tusb_cfg));
+    ESP_LOGI(TAG, "USB MIDI initialization DONE");
+#else
+    ESP_LOGW(TAG, "USB MIDI support is disabled in this build");
+#endif
+
     load_presets_from_flash();
     load_preset(0);
-    
+    ESP_LOGI(TAG, "test");
+
     xTaskCreate(Handle_Buttons_Task, "buttons_task", 4096, NULL, 5, NULL);
     xTaskCreate(MIDI_RX_Task, "midi_rx_task", 4096, NULL, 4, NULL); 
     xTaskCreate(Expression_Pedal_Task, "exp_pedal_task", 4096, NULL, 4, NULL); 
