@@ -86,6 +86,8 @@ typedef struct {
 #define PRESETS_PER_BANK 4
 #define TOTAL_PRESETS (NUM_BANKS * PRESETS_PER_BANK)
 
+#include "preset_seed.h"
+
 Preset presety[TOTAL_PRESETS];
 int active_preset_idx = 0; 
 uint8_t active_bank = 0;
@@ -854,16 +856,7 @@ void load_presets_from_flash(void)
         );
 
         if (err == ESP_ERR_NVS_NOT_FOUND) {
-
-            memset(&presety[i], 0, sizeof(Preset));
-
-            presety[i].exp_channel = 0;
-            presety[i].exp_cc_num = 11;
-
-            for(int m = 0; m < 10; m++) {
-                presety[i].midi_msgs[m].is_tx = 1;
-                presety[i].midi_msgs[m].uart_num = 1;
-            }
+            presety[i] = preset_seed[i];
         }
     }
 
